@@ -1,7 +1,7 @@
 #!/bin/bash
 # =====================================================================
 # 4조(뉴로플랜) firewalld 1차 적용 스크립트
-# 기준 문서: claude/방화벽_정책_1차_정리.md (§4 VM별 인바운드 허용 규칙, §7 Calico-firewalld 충돌 공지)
+# 기준 문서: claude/방화벽_정책_1차_정리.md (§4 VM별 인바운드 허용 규칙)
 #
 # 사용법: (팀 명명 규칙 — hostname은 서버이름 소문자, 예: LB1 → lb1)
 #   1) 이 스크립트를 13대 VM 전부에 그대로 복사
@@ -11,15 +11,6 @@
 # 지원하는 hostname / VM_NAME 값 (대소문자 무관하게 소문자로 변환해서 비교):
 #   lb1 lb2 cp1 cp2 cp3 worker1 worker2 worker3 devops
 #   db-primary db-replica nfs infra
-#
-# ⚠️ 2026-08-24 공지 반영: cp1/cp2/cp3/worker1/worker2/worker3(K8s 클러스터
-# 멤버, kubelet+Calico가 도는 노드)는 더 이상 firewalld 규칙을 적용하지
-# 않고 firewalld 자체를 완전히 비활성화합니다. Calico 공식 문서가 "호스트에
-# firewalld 등 iptables 매니저가 있으면 비활성화해야 한다"고 명시하고
-# 있고(Calico가 자체 iptables 규칙을 심는데 firewalld와 관리 주체가 겹치면
-# 충돌해서 Pod 통신/DNS/NetworkPolicy가 깨짐), 아래 5절의 VM별 상세 규칙은
-# 이 6대 한정으로는 더 이상 쓰이지 않습니다(비-K8s 노드 7대는 그대로 적용).
-# 근거/트레이드오프는 방화벽_정책_1차_정리.md §7 참고.
 #
 # 이 스크립트는 "이 VM이 실제로 어떤 Zone NIC을 갖고 있는지"를
 # IP 대역(192.168.14/24/34/44.0/24)으로 자동 탐지해서 해당 인터페이스만
@@ -46,25 +37,7 @@ VM_NAME="$(echo "$VM_NAME" | tr '[:upper:]' '[:lower:]')"
 echo ">>> VM_NAME = ${VM_NAME}"
 
 # ---------------------------------------------------------------------
-# -1. K8s 클러스터 노드는 firewalld 자체를 끄고 즉시 종료 (2026-08-24 공지)
-#     Calico가 노드에 직접 iptables 규칙을 심는데 firewalld와 충돌하므로,
-#     zone/규칙을 만들지 않고 여기서 바로 비활성화 후 스크립트를 마칩니다.
-#     기존에 이 VM에 규칙을 걸어둔 적이 있어도(cp1/worker1 등) 상관없이
-#     firewalld 서비스 자체를 끄면 그 규칙도 같이 무효화됩니다.
-# ---------------------------------------------------------------------
-case "$VM_NAME" in
-  cp1|cp2|cp3|worker1|worker2|worker3)
-    echo ">>> ${VM_NAME}은 K8s 클러스터 노드(Calico) — firewalld 규칙 적용 대신 완전 비활성화합니다."
-    echo "    근거: Calico 공식 문서 — firewalld 등 iptables 매니저는 비활성화 권장(방화벽_정책_1차_정리.md §7 참고)"
-    systemctl disable --now firewalld
-    echo ">>> ${VM_NAME} firewalld 비활성화 완료. 규칙은 적용하지 않았습니다(정상 동작)."
-    exit 0
-    ;;
-esac
-
-# ---------------------------------------------------------------------
-# 0. firewalld 기동 (여기부터는 비-K8s 노드 7대: lb1 lb2 devops
-#    db-primary db-replica nfs infra)
+# 0. firewalld 기동
 # ---------------------------------------------------------------------
 systemctl enable --now firewalld
 
@@ -117,8 +90,6 @@ DATA_NET="192.168.44.0/24"
 # 2-1. 같은 zone 대역에서 오는 ping(ICMP echo-request) 허용
 #      target=DROP이면 ICMP도 기본 차단되어 내부-내부 ping이 안 됨.
 #      각 zone에 "자기 zone 대역에서 오는 ping"만 허용 (2026-08-21 cp1에서 발견)
-#      ※ 이 7대(lb1 lb2 devops db-primary db-replica nfs infra) 기준.
-#        K8s 노드 6대는 위에서 이미 종료되어 여기 도달하지 않음.
 # ---------------------------------------------------------------------
 allow_ping() {
   local zone="$1" net="$2"
@@ -132,12 +103,12 @@ allow_ping() {
 [[ -n "$DATA_IF" ]] && allow_ping nw-data     "$DATA_NET"
 
 # ---------------------------------------------------------------------
-# 2-2. (참고용, 실질적으로 더 이상 쓰이지 않음 — 2026-08-24)
-#      원래는 Calico Pod CIDR(10.244.0.0/16)이 direct routing될 때 대비해
-#      Internal zone에서 전부 허용해두려던 규칙이었으나, Internal NIC을
-#      가진 VM은 CP1~3/Worker1~3/LB1~2뿐이고 CP/Worker는 이제 firewalld가
-#      아예 꺼지므로 이 규칙이 실제로 붙는 대상은 LB1~2뿐(K8s 노드가
-#      아니라 Pod CIDR 트래픽과 무관). 그대로 남겨둬도 무해해서 유지.
+# 2-2. Calico Pod CIDR(10.244.0.0/16) 전체를 Internal zone에서 허용
+#      Pod가 노드 IP가 아니라 Pod 자체 IP(10.244.x.x)를 달고 노드 간을
+#      오갈 수 있음(Calico가 캡슐화 없이 direct routing 하는 경우).
+#      이 경우 대비해서 Pod CIDR 트래픽은 전부(포트 무관) 허용해둠.
+#      VXLAN(4789/udp)으로 캡슐화되는 경우엔 이 규칙이 아예 안 쓰이지만
+#      있어도 무해함. (2026-08-21 히재 확인)
 # ---------------------------------------------------------------------
 POD_CIDR="10.244.0.0/16"
 if [[ -n "$INT_IF" ]]; then
@@ -177,10 +148,6 @@ INFRA_MGMT=192.168.14.62; INFRA_DATA=192.168.44.62
 
 # ---------------------------------------------------------------------
 # 4. VM별 규칙 (문서 §4 기준)
-#    ⚠️ cp1/cp2/cp3/worker1/worker2/worker3 케이스는 위 -1단계에서 이미
-#    종료되어 여기 도달하지 않습니다(firewalld 비활성화 처리됨, §7 참고).
-#    아래는 나머지 7대(lb1 lb2 devops db-primary db-replica nfs infra)만
-#    대상입니다.
 # ---------------------------------------------------------------------
 case "$VM_NAME" in
 
@@ -217,12 +184,33 @@ case "$VM_NAME" in
 
   infra)
     allow nw-data udp 123 "$DBP_DATA"; allow nw-data udp 123 "$DBR_DATA"; allow nw-data udp 123 192.168.44.61  # chrony(Data 경로), §1
+    allow nw-data tcp 9000 192.168.44.61  # MinIO 백업 미러(NFS→Infra:9000), 방화벽_정책_1차_정리.md §8
     allow nw-mgmt udp 53  "$MGMT_NET"           # DNS, §3-5
     allow nw-mgmt tcp 53  "$MGMT_NET"           # DNS
     allow nw-mgmt udp 123 "$MGMT_NET"           # chrony(Mgmt 경로, 전체 VM용), §3-5-부가
     allow nw-mgmt tcp 22  "$MGMT_NET"
     allow nw-mgmt tcp 9100 "$MGMT_NET"
     # Infra는 Outside NIC(인터넷 게이트웨이)도 있으나 이 스크립트는 Zone NIC만 다룸 — NAT/forwarding은 별도 설정
+    ;;
+
+  cp1|cp2|cp3)
+    allow nw-mgmt tcp 22   "$MGMT_NET"
+    allow nw-internal tcp 9100 "$W1_INT"; allow nw-internal tcp 9100 "$W2_INT"; allow nw-internal tcp 9100 "$W3_INT"   # §3-3-부가
+    allow nw-internal tcp 6443 "$INT_NET"        # K8s API, §2
+    allow nw-internal tcp 2379-2380 "$INT_NET"   # etcd, §2 (이상적으론 CP끼리만이지만 편의상 Internal 전체 허용)
+    allow nw-internal tcp 10250 "$INT_NET"       # kubelet, §2
+    allow_proto nw-internal vrrp "$INT_NET"      # 필요 시(주로 LB에서 쓰지만 CP는 보통 불필요 — 안 쓰면 제거)
+    ;;
+
+  worker1|worker2|worker3)
+    allow nw-mgmt tcp 22   "$MGMT_NET"
+    allow nw-internal tcp 9100 "$W1_INT"; allow nw-internal tcp 9100 "$W2_INT"; allow nw-internal tcp 9100 "$W3_INT"   # §3-3-부가
+    allow nw-internal tcp 6443 "$INT_NET"
+    allow nw-internal tcp 10250 "$INT_NET"
+    allow nw-internal tcp 30080 "$LB1_INT"; allow nw-internal tcp 30080 "$LB2_INT"   # NGF HTTP, LB만 접근
+    allow nw-internal tcp 30443 "$LB1_INT"; allow nw-internal tcp 30443 "$LB2_INT"   # NGF HTTPS
+    allow nw-internal udp 4789 "$INT_NET"        # Calico VXLAN 사용 시
+    allow nw-internal tcp 179  "$INT_NET"        # Calico BGP 사용 시
     ;;
 
   lb1|lb2)
@@ -240,7 +228,6 @@ case "$VM_NAME" in
   *)
     echo "알 수 없는 VM_NAME: ${VM_NAME}" >&2
     echo "지원 목록: lb1 lb2 cp1 cp2 cp3 worker1 worker2 worker3 devops db-primary db-replica nfs infra" >&2
-    echo "(cp1/cp2/cp3/worker1/worker2/worker3는 위 -1단계에서 이미 처리되어 여기로 오지 않습니다)" >&2
     exit 1
     ;;
 esac
