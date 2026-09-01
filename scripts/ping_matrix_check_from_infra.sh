@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # ping_matrix_check_from_infra.sh
 #
-# Infra VM(192.168.14.62)의 script_net/ 안에서 실행 — 13대 VM 전부를 SSH로 돌며
-# "같은 Zone 내부" ping 매트릭스를 자동으로 검증.
+# Infra VM(192.168.14.62)의 script_net/ 안에서 실행 — 13대 VM + PC6(minio-s3/dr-k3s)
+# 전부를 SSH로 돌며 "같은 Zone 내부" ping 매트릭스를 자동으로 검증.
+# (2026-08-31 업데이트: minio-s3/dr-k3s 신규 추가)
 #
 # 멀티홈 VM(LB1/LB2, Worker1~3, DevOps, Infra)은 자기가 속한 Zone마다 각각
 # 별도로 테스트되므로(예: Worker1은 MGMT/INTERNAL/DATA 세 번 다 등장), 이 매트릭스 자체가
@@ -11,21 +12,19 @@
 # 동시에 가져서 DB 접근이 되는 구조 등).
 #
 # 전제:
-#   - 13대 VM 전부 root 비밀번호 = centos
+#   - 전 VM root 비밀번호 = centos (minio-s3/dr-k3s도 동일 전제 — 다르면 SSH_PASS 수정)
 #   - Management(192.168.14.0/24)로 전 VM 22/tcp 접속 가능(ip_addr_check_from_infra.sh와 동일 전제)
 #
 # 사용법 (Infra VM, script_net/ 안에서):
 #   chmod +x ping_matrix_check_from_infra.sh
 #   ./ping_matrix_check_from_infra.sh
 #   -> 화면 출력 + script_net/logs/ping_matrix_result_YYYYMMDD_HHMM.log 자동 저장
-#   -> 대상 약 300여 건(양방향)이라 전체 실행에 몇 분 걸릴 수 있음
+#   -> 대상 건수가 늘어서(15대) 전체 실행에 몇 분 걸릴 수 있음
 #
 # 참고: DMZ<->Data처럼 두 Zone을 동시에 가진 VM이 없는 조합은 애초에 경로가 없어서
 #       이 스크립트의 매트릭스 생성 로직 자체가 그런 조합을 만들지 않음(설계상 정상).
 #       그 전제가 실제로 맞는지 맨 아래에서 격리 체크(DMZ -> Data) 1건을 별도로 확인함.
-
 set -uo pipefail
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_DIR="${SCRIPT_DIR}/logs"
 mkdir -p "$LOG_DIR"
@@ -33,10 +32,8 @@ LOG_FILE="${LOG_DIR}/ping_matrix_result_$(date +%Y%m%d_%H%M).log"
 exec > >(tee "$LOG_FILE") 2>&1
 echo ">>> 로그 저장 위치: $LOG_FILE"
 echo ""
-
 SSH_PASS="centos"
 SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -o LogLevel=ERROR"
-
 if ! command -v sshpass >/dev/null 2>&1; then
     echo ">>> sshpass 미설치 — 설치 시도"
     dnf install -y epel-release >/dev/null 2>&1
@@ -46,7 +43,6 @@ if ! command -v sshpass >/dev/null 2>&1; then
         exit 1
     fi
 fi
-
 # ---- Zone별 IP (1차_IP_주소설계_전체표.md Layer 2 표 기준. 소속 없는 Zone은 키가 아예 없음) ----
 declare -A MGMT_IP=(
   [lb1]="192.168.14.11" [lb2]="192.168.14.12"
@@ -55,6 +51,7 @@ declare -A MGMT_IP=(
   [devops]="192.168.14.21"
   [db-primary]="192.168.14.51" [db-replica]="192.168.14.52"
   [nfs]="192.168.14.61" [infra]="192.168.14.62"
+  [minio-s3]="192.168.14.72" [dr-k3s]="192.168.14.71"
 )
 declare -A DMZ_IP=(
   [lb1]="192.168.24.11" [lb2]="192.168.24.12"
@@ -64,22 +61,21 @@ declare -A INTERNAL_IP=(
   [cp1]="192.168.34.31" [cp2]="192.168.34.32" [cp3]="192.168.34.33"
   [worker1]="192.168.34.41" [worker2]="192.168.34.42" [worker3]="192.168.34.43"
   [devops]="192.168.34.21" [infra]="192.168.34.62"
+  [dr-k3s]="192.168.34.71"
 )
 declare -A DATA_IP=(
   [worker1]="192.168.44.41" [worker2]="192.168.44.42" [worker3]="192.168.44.43"
   [devops]="192.168.44.21"
   [db-primary]="192.168.44.51" [db-replica]="192.168.44.52"
   [nfs]="192.168.44.61" [infra]="192.168.44.62"
+  [minio-s3]="192.168.44.72"
 )
-
-ALL_VMS=(lb1 lb2 cp1 cp2 cp3 worker1 worker2 worker3 devops db-primary db-replica nfs infra)
-
+ALL_VMS=(lb1 lb2 cp1 cp2 cp3 worker1 worker2 worker3 devops db-primary db-replica nfs infra minio-s3 dr-k3s)
 TOTAL_OK=0
 TOTAL_FAIL=0
 declare -A ZONE_OK=( [MGMT]=0 [DMZ]=0 [INTERNAL]=0 [DATA]=0 )
 declare -A ZONE_FAIL=( [MGMT]=0 [DMZ]=0 [INTERNAL]=0 [DATA]=0 )
 FAIL_LINES=()
-
 # 원격/로컬 공통으로 쓰는 ping 루프 — "zone dstname dstip"를 stdin으로 받아
 # "OK|FAIL zone dstname dstip" 한 줄씩 출력. src 이름은 여기서 다루지 않고
 # 호출부(로컬)에서 붙임 — 변수 이스케이프 이슈를 피하기 위함.
@@ -93,12 +89,10 @@ while read -r zone dstname dstip; do
     fi
 done
 EOF
-
 run_matrix_for() {
     local src="$1"
     local src_mgmt_ip="${MGMT_IP[$src]}"
     local -a targets=()
-
     for dst in "${ALL_VMS[@]}"; do
         [ "$dst" == "$src" ] && continue
         if [[ -n "${MGMT_IP[$src]:-}" && -n "${MGMT_IP[$dst]:-}" ]]; then
@@ -114,11 +108,8 @@ run_matrix_for() {
             targets+=("DATA $dst ${DATA_IP[$dst]}")
         fi
     done
-
     [ "${#targets[@]}" -eq 0 ] && return
-
     echo "----- ${src} 기준 (${#targets[@]}건) -----"
-
     local result
     if [ "$src" == "infra" ]; then
         result="$(printf '%s\n' "${targets[@]}" | bash -c "$PING_LOOP")"
@@ -130,7 +121,6 @@ run_matrix_for() {
             return
         fi
     fi
-
     while read -r status zone dstname dstip; do
         [ -z "$status" ] && continue
         if [ "$status" == "OK" ]; then
@@ -145,14 +135,11 @@ run_matrix_for() {
             FAIL_LINES+=("$line")
         fi
     done <<< "$result"
-
     echo ""
 }
-
 for vm in "${ALL_VMS[@]}"; do
     run_matrix_for "$vm"
 done
-
 echo "===== 격리 확인 (DMZ -> Data, 실패가 정상) ====="
 iso_result="$(sshpass -p "$SSH_PASS" ssh $SSH_OPTS "root@${MGMT_IP[lb1]}" \
     "ping -c 1 -W 1 -q 192.168.44.41 >/dev/null 2>&1 && echo REACHABLE || echo UNREACHABLE")"
@@ -164,13 +151,11 @@ else
     echo "!! 경고 — lb1(DMZ)에서 worker1 Data(192.168.44.41)로 ping이 성공함. 의도치 않은 경로(라우팅/방화벽) 재확인 필요"
 fi
 echo ""
-
 echo "===== 요약 ====="
 echo "전체: OK ${TOTAL_OK} / FAIL ${TOTAL_FAIL}"
 for zone in MGMT DMZ INTERNAL DATA; do
     echo "  ${zone}: OK ${ZONE_OK[$zone]:-0} / FAIL ${ZONE_FAIL[$zone]:-0}"
 done
-
 if [ "${#FAIL_LINES[@]}" -gt 0 ]; then
     echo ""
     echo "!! FAIL 목록:"
