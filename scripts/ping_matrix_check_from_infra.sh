@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # ping_matrix_check_from_infra.sh
 #
-# Infra VM(192.168.14.62)의 script_net/ 안에서 실행 — 13대 VM + PC6(minio-s3/dr-k3s)
+# Infra VM(192.168.14.62)의 script_net/ 안에서 실행 — 13대 VM + PC6(minio-s3/dr-k3s/monitoring)
 # 전부를 SSH로 돌며 "같은 Zone 내부" ping 매트릭스를 자동으로 검증.
 # (2026-08-31 업데이트: minio-s3/dr-k3s 신규 추가)
+# (2026-09-08 업데이트: monitoring 신규 추가 — Mgmt .14.73 / Internal .34.73 / Data .44.73, DMZ 없음)
 #
 # 멀티홈 VM(LB1/LB2, Worker1~3, DevOps, Infra)은 자기가 속한 Zone마다 각각
 # 별도로 테스트되므로(예: Worker1은 MGMT/INTERNAL/DATA 세 번 다 등장), 이 매트릭스 자체가
@@ -12,14 +13,14 @@
 # 동시에 가져서 DB 접근이 되는 구조 등).
 #
 # 전제:
-#   - 전 VM root 비밀번호 = centos (minio-s3/dr-k3s도 동일 전제 — 다르면 SSH_PASS 수정)
+#   - 전 VM root 비밀번호 = centos (minio-s3/dr-k3s/monitoring도 동일 전제 — 다르면 SSH_PASS 수정)
 #   - Management(192.168.14.0/24)로 전 VM 22/tcp 접속 가능(ip_addr_check_from_infra.sh와 동일 전제)
 #
 # 사용법 (Infra VM, script_net/ 안에서):
 #   chmod +x ping_matrix_check_from_infra.sh
 #   ./ping_matrix_check_from_infra.sh
 #   -> 화면 출력 + script_net/logs/ping_matrix_result_YYYYMMDD_HHMM.log 자동 저장
-#   -> 대상 건수가 늘어서(15대) 전체 실행에 몇 분 걸릴 수 있음
+#   -> 대상 건수가 늘어서(16대) 전체 실행에 몇 분 걸릴 수 있음
 #
 # 참고: DMZ<->Data처럼 두 Zone을 동시에 가진 VM이 없는 조합은 애초에 경로가 없어서
 #       이 스크립트의 매트릭스 생성 로직 자체가 그런 조합을 만들지 않음(설계상 정상).
@@ -52,6 +53,7 @@ declare -A MGMT_IP=(
   [db-primary]="192.168.14.51" [db-replica]="192.168.14.52"
   [nfs]="192.168.14.61" [infra]="192.168.14.62"
   [minio-s3]="192.168.14.72" [dr-k3s]="192.168.14.71"
+  [monitoring]="192.168.14.73"
 )
 declare -A DMZ_IP=(
   [lb1]="192.168.24.11" [lb2]="192.168.24.12"
@@ -62,6 +64,7 @@ declare -A INTERNAL_IP=(
   [worker1]="192.168.34.41" [worker2]="192.168.34.42" [worker3]="192.168.34.43"
   [devops]="192.168.34.21" [infra]="192.168.34.62"
   [dr-k3s]="192.168.34.71"
+  [monitoring]="192.168.34.73"
 )
 declare -A DATA_IP=(
   [worker1]="192.168.44.41" [worker2]="192.168.44.42" [worker3]="192.168.44.43"
@@ -69,8 +72,10 @@ declare -A DATA_IP=(
   [db-primary]="192.168.44.51" [db-replica]="192.168.44.52"
   [nfs]="192.168.44.61" [infra]="192.168.44.62"
   [minio-s3]="192.168.44.72"
+  [dr-k3s]="192.168.44.71"
+  [monitoring]="192.168.44.73"
 )
-ALL_VMS=(lb1 lb2 cp1 cp2 cp3 worker1 worker2 worker3 devops db-primary db-replica nfs infra minio-s3 dr-k3s)
+ALL_VMS=(lb1 lb2 cp1 cp2 cp3 worker1 worker2 worker3 devops db-primary db-replica nfs infra minio-s3 dr-k3s monitoring)
 TOTAL_OK=0
 TOTAL_FAIL=0
 declare -A ZONE_OK=( [MGMT]=0 [DMZ]=0 [INTERNAL]=0 [DATA]=0 )
