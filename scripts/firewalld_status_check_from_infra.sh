@@ -1,20 +1,21 @@
 #!/usr/bin/env bash
 # firewalld_status_check_from_infra.sh
 #
-# Infra VM(192.168.14.62)의 script_net/ 안에서 실행 — 13대 VM + PC6(minio-s3/dr-k3s)
+# Infra VM(192.168.14.62)의 script_net/ 안에서 실행 — 13대 VM + PC6(minio-s3/dr-k3s/monitoring)
 # firewalld 상태를 방화벽_정책_1차_정리.md §7(CP/Worker/dr-k3s 비활성화) ·
 # firewalld_setup.sh(nw-* zone) 기준으로 일괄 점검. 마지막에 outside-to-jenkins
 # 정책 옛 IP(10.1.93.82) 자동 정정까지 수행. (2026-08-31: minio-s3/dr-k3s 신규 추가)
+# (2026-09-08: monitoring 신규 추가 — Mgmt+Internal+Data 3-NIC, nw-mgmt/nw-internal/nw-data 기대)
 #
 # 점검 항목:
-#   1) devops/db-primary/db-replica/nfs/infra/minio-s3 — firewalld 활성 + nw-* zone(예상 목록) 존재 확인
+#   1) devops/db-primary/db-replica/nfs/infra/minio-s3/monitoring — firewalld 활성 + nw-* zone(예상 목록) 존재 확인
 #      + 내장 dmz/internal zone에 우리 NIC이 잘못 붙은 게 없는지(과거 lb1 이슈) 재확인
 #   2) cp1~3/worker1~3/dr-k3s — firewalld가 §7 결정대로 비활성 상태인지 확인
 #   3) Infra: outside-to-jenkins 정책 rich-rule에 옛 IP(10.1.93.82)가 남아있으면
 #      제거 후 정정값(10.1.93.4)으로 자동 재적용
 #   4) Infra: external zone 기본 서비스 목록 + masquerade 상태 출력
 #
-# 전제: 전 VM root 비밀번호 = centos (minio-s3/dr-k3s도 동일 전제 — 다르면 SSH_PASS 수정), Management 22/tcp 접속 가능
+# 전제: 전 VM root 비밀번호 = centos (minio-s3/dr-k3s/monitoring도 동일 전제 — 다르면 SSH_PASS 수정), Management 22/tcp 접속 가능
 #
 # 사용법 (Infra, script_net/ 안에서):
 #   chmod +x firewalld_status_check_from_infra.sh
@@ -47,6 +48,7 @@ declare -A MGMT_IP=(
   [cp1]="192.168.14.31" [cp2]="192.168.14.32" [cp3]="192.168.14.33"
   [worker1]="192.168.14.41" [worker2]="192.168.14.42" [worker3]="192.168.14.43"
   [minio-s3]="192.168.14.72" [dr-k3s]="192.168.14.71"
+  [monitoring]="192.168.14.73"
 )
 # firewalld 활성 VM별 기대 nw-* zone 목록 (firewalld_setup.sh의 find_iface 대상과 동일 기준)
 declare -A EXPECTED_ZONES=(
@@ -57,12 +59,13 @@ declare -A EXPECTED_ZONES=(
   [db-replica]="nw-mgmt nw-data"
   [nfs]="nw-mgmt nw-data"
   [minio-s3]="nw-mgmt nw-data"
+  [monitoring]="nw-mgmt nw-internal nw-data"
 )
-FW_ACTIVE_VMS=(lb1 lb2 devops db-primary db-replica nfs minio-s3)
+FW_ACTIVE_VMS=(lb1 lb2 devops db-primary db-replica nfs minio-s3 monitoring)
 FW_DISABLED_VMS=(cp1 cp2 cp3 worker1 worker2 worker3 dr-k3s)
 WARN_COUNT=0
 echo "===================================================================="
-echo " 1) firewalld 활성 VM (lb1/lb2/devops/db-primary/db-replica/nfs/minio-s3)"
+echo " 1) firewalld 활성 VM (lb1/lb2/devops/db-primary/db-replica/nfs/minio-s3/monitoring)"
 echo "===================================================================="
 for vm in "${FW_ACTIVE_VMS[@]}"; do
     ip_addr="${MGMT_IP[$vm]}"

@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # ip_addr_check_from_infra.sh
 #
-# Infra VM(192.168.14.62)에서 실행 — 13대 VM(Infra 자신 포함) + PC6(minio-s3/dr-k3s)
+# Infra VM(192.168.14.62)에서 실행 — 13대 VM(Infra 자신 포함) + PC6(minio-s3/dr-k3s/monitoring)
 # 전부에서 ip -br addr을 뽑아 한 화면에 모아줌. 1차_IP_주소설계_전체표.md의
 # Layer 2 IP 설계표와 대조하는 용도. (2026-08-31: minio-s3/dr-k3s 신규 추가)
+# (2026-09-08: monitoring 신규 추가 — Mgmt .14.73)
 #
 # 전제:
-#   - 전 VM root 비밀번호 = centos (minio-s3/dr-k3s도 동일 전제 — 다르면 SSH_PASS 수정)
+#   - 전 VM root 비밀번호 = centos (minio-s3/dr-k3s/monitoring도 동일 전제 — 다르면 SSH_PASS 수정)
 #   - Management(192.168.14.0/24) 대역에서 22/tcp 허용됨
 #     (firewalld_setup.sh 기준: K8s/k3s 노드(cp1~3/worker1~3/dr-k3s)는 firewalld 자체가
 #      꺼져 있어 통과, 나머지는 nw-mgmt zone에서 Mgmt 대역 22/tcp 허용)
@@ -39,7 +40,7 @@ if ! command -v sshpass >/dev/null 2>&1; then
 fi
 # VM 이름 → Management IP (1차_IP_주소설계_전체표.md Layer 2 표 기준)
 # Infra 자신은 로컬에서 바로 조회하므로 목록에서 제외.
-VM_ORDER=(lb1 lb2 cp1 cp2 cp3 worker1 worker2 worker3 devops db-primary db-replica nfs minio-s3 dr-k3s)
+VM_ORDER=(lb1 lb2 cp1 cp2 cp3 worker1 worker2 worker3 devops db-primary db-replica nfs minio-s3 dr-k3s monitoring)
 declare -A VM_IP=(
   [lb1]="192.168.14.11"
   [lb2]="192.168.14.12"
@@ -55,6 +56,7 @@ declare -A VM_IP=(
   [nfs]="192.168.14.61"
   [minio-s3]="192.168.14.72"
   [dr-k3s]="192.168.14.71"
+  [monitoring]="192.168.14.73"
 )
 FAILED=()
 echo "===== infra (local, 192.168.14.62) ====="
@@ -74,5 +76,5 @@ if [ "${#FAILED[@]}" -gt 0 ]; then
     echo "!! 접속 실패한 VM: ${FAILED[*]}"
     echo "   -> sshd 상태 / firewalld nw-mgmt 규칙 / 비밀번호(centos) 먼저 확인"
 else
-    echo "15대 전부 정상 응답"
+    echo "16대 전부 정상 응답"
 fi
